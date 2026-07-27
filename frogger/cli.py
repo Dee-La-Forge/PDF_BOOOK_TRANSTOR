@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -11,13 +12,18 @@ from rich.table import Table
 
 from . import report as reporting
 from .classify import classify, summary
-from .config import DEFAULT_EFFORT, DEFAULT_MODEL, MIN_SCALE, Workspace
+from .config import DEFAULT_EFFORT, DEFAULT_MODEL, MIN_SCALE, Workspace, load_env
 from .extract import extract
 from .glossary import Glossary, load_glossary
-from .models import Kind
 from .render import render as render_pdf
-from .store import Store
-from .translate import ClaudeTranslator, FakeTranslator, translate_blocks
+from .store import Store, cache_key
+from .translate import (
+    ClaudeTranslator,
+    DeepSeekTranslator,
+    FakeTranslator,
+    OllamaTranslator,
+    translate_blocks,
+)
 
 console = Console()
 app = typer.Typer(
@@ -62,6 +68,36 @@ def resolve_pdf(store: Store, pdf: Optional[Path]) -> Path:
     if not path.is_file():
         raise typer.BadParameter(f"Fichier introuvable : {path}")
     return path
+
+
+ENGINES = ("claude", "deepseek", "ollama", "fake")
+
+
+def build_translator(
+    engine: str,
+    glossary: Glossary,
+    model: str,
+    effort: str,
+    temperature: Optional[float],
+    base_url: Optional[str],
+):
+    """`model` vaut le défaut Claude tant que l'utilisateur ne l'a pas changé :
+    on ne le transmet donc qu'aux moteurs auxquels il correspond."""
+    custom_model = model if model != DEFAULT_MODEL else None
+
+    if engine == "fake":
+        return FakeTranslator()
+    if engine == "claude":
+        return ClaudeTranslator(glossary, model=model, effort=effort)
+    if engine == "deepseek":
+        return DeepSeekTranslator(
+            glossary, model=custom_model, temperature=temperature, base_url=base_url
+        )
+    if engine == "ollama":
+        return OllamaTranslator(
+            glossary, model=custom_model, temperature=temperature, base_url=base_url
+        )
+    raise typer.BadParameter(f"--engine attend l'un de : {', '.join(ENGINES)}.")
 
 
 # --- commandes ---------------------------------------------------------------
@@ -127,12 +163,15 @@ def classify_cmd(work: Path = WORK_OPT, pages: Optional[str] = PAGES_OPT):
 def translate_cmd(
     work: Path = WORK_OPT,
     pages: Optional[str] = PAGES_OPT,
-    engine: str = typer.Option("claude", "--engine", help="claude | fake"),
-    model: str = typer.Option(DEFAULT_MODEL, "--model", help="Identifiant du modèle Claude."),
-    effort: str = typer.Option(DEFAULT_EFFORT, "--effort", help="low | medium | high | xhigh | max"),
+    engine: str = typer.Option("claude", "--engine", help="claude | deepseek | ollama | fake"),
+    model: str = typer.Option(DEFAULT_MODEL, "--model", help="Identifiant du modèle."),
+    effort: str = typer.Option(DEFAULT_EFFORT, "--effort", help="Claude : low | medium | high | xhigh | max"),
+    temperature: Optional[float] = typer.Option(None, "--temperature", help="DeepSeek / Ollama."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Point d'entrée compatible OpenAI."),
     glossary_path: Optional[Path] = typer.Option(None, "--glossary", help="Glossaire JSON alternatif."),
 ):
     """Traduit les blocs de prose (cache : rien n'est repayé deux fois)."""
+    load_env()
     selection = parse_pages(pages)
     glossary = Glossary.load(glossary_path) if glossary_path else load_glossary()
 
@@ -143,33 +182,89 @@ def translate_cmd(
             console.print("[yellow]Aucun bloc traduisible — lancez d'abord `extract`.[/yellow]")
             raise typer.Exit(1)
 
-        if engine == "fake":
-            translator = FakeTranslator()
-            model_id = "fake"
-        elif engine == "claude":
-            translator = ClaudeTranslator(glossary, model=model, effort=effort)
-            model_id = model
-        else:
-            raise typer.BadParameter("--engine attend « claude » ou « fake ».")
-
+        translator = build_translator(engine, glossary, model, effort, temperature, base_url)
         console.print(
-            f"{len(todo)} blocs à traduire · moteur [cyan]{engine}[/cyan]"
-            + (f" · modèle [cyan]{model}[/cyan] · effort {effort}" if engine == "claude" else "")
+            f"{len(todo)} blocs à traduire · moteur [cyan]{engine}[/cyan] · "
+            f"modèle [cyan]{translator.model_id}[/cyan]"
+            + (f" · {translator.profile}" if translator.profile else "")
         )
 
         with console.status("Traduction en cours…") as status:
             def progress(page: int, n: int) -> None:
                 status.update(f"Page {page + 1} — {n} blocs")
 
-            run = translate_blocks(
-                blocks, translator, store, glossary.digest, model_id, effort, progress=progress
-            )
+            run = translate_blocks(blocks, translator, store, glossary.digest, progress=progress)
 
     done = sum(1 for b in blocks if b.translatable and b.fr)
     console.print(f"[green]{done}/{len(todo)}[/green] blocs traduits")
-    reporting.print_usage(console, run.usage, model_id)
+    reporting.print_usage(console, run.usage, translator.model_id)
     for err in run.errors:
         console.print(f"[red]![/red] {err}")
+
+
+def export_cmd(
+    out: Path = typer.Option(..., "--out", "-o", help="Fichier JSON à produire."),
+    work: Path = WORK_OPT,
+    pages: Optional[str] = PAGES_OPT,
+    only_missing: bool = typer.Option(True, "--only-missing/--all", help="N'exporter que le non traduit."),
+):
+    """Exporte les blocs à traduire, pour une traduction hors pipeline.
+
+    Permet de faire traduire le lot par n'importe quel moyen — y compris une
+    session Claude Code — puis de réinjecter le résultat avec `import-fr`.
+    """
+    selection = parse_pages(pages)
+    with open_store(work) as store:
+        blocks = [b for b in store.blocks(selection) if b.translatable and b.text.strip()]
+        if only_missing:
+            blocks = [b for b in blocks if not b.fr]
+        payload = [
+            {
+                "id": b.id,
+                "page": b.page + 1,
+                "nature": b.kind.value,
+                "budget_caracteres": b.char_budget,
+                "en": b.text,
+                "fr": b.fr or "",
+            }
+            for b in blocks
+        ]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    console.print(f"[green]{len(payload)}[/green] blocs exportés vers [cyan]{out}[/cyan]")
+
+
+def import_cmd(
+    source: Path = typer.Option(..., "--in", "-i", help="Fichier JSON traduit."),
+    work: Path = WORK_OPT,
+    label: str = typer.Option("manuel", "--label", help="Étiquette du moteur, pour le cache."),
+):
+    """Réinjecte des traductions produites hors pipeline."""
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    glossary = load_glossary()
+
+    with open_store(work) as store:
+        blocks = {b.id: b for b in store.blocks()}
+        updated = []
+        missing = []
+        for item in payload:
+            block = blocks.get(item["id"])
+            if block is None:
+                missing.append(item["id"])
+                continue
+            fr = (item.get("fr") or "").strip()
+            if not fr:
+                continue
+            block.fr = fr
+            updated.append(block)
+            store.cache_put(
+                cache_key(label, "", glossary.digest, block.char_budget, block.text), fr, label
+            )
+        store.put_blocks(updated)
+
+    console.print(f"[green]{len(updated)}[/green] blocs mis à jour")
+    if missing:
+        console.print(f"[yellow]{len(missing)} identifiants inconnus[/yellow] : {missing[:5]}")
 
 
 def render_cmd(
@@ -186,8 +281,7 @@ def render_cmd(
     with open_store(work) as store:
         source = resolve_pdf(store, pdf)
         blocks = store.blocks(selection)
-        ready = [b for b in blocks if b.translatable and b.fr]
-        if not ready:
+        if not any(b.translatable and b.fr for b in blocks):
             console.print("[yellow]Aucun bloc traduit — lancez d'abord `translate`.[/yellow]")
             raise typer.Exit(1)
 
@@ -221,14 +315,19 @@ def run(
     out: Path = typer.Option(..., "--out", "-o", help="PDF de sortie."),
     pages: Optional[str] = PAGES_OPT,
     work: Path = WORK_OPT,
-    engine: str = typer.Option("claude", "--engine", help="claude | fake"),
+    engine: str = typer.Option("claude", "--engine", help="claude | deepseek | ollama | fake"),
     model: str = typer.Option(DEFAULT_MODEL, "--model"),
     effort: str = typer.Option(DEFAULT_EFFORT, "--effort"),
+    temperature: Optional[float] = typer.Option(None, "--temperature"),
+    base_url: Optional[str] = typer.Option(None, "--base-url"),
     subset: bool = typer.Option(False, "--subset"),
 ):
     """Enchaîne extract → translate → render."""
     extract_cmd(pdf=pdf, pages=pages, work=work)
-    translate_cmd(work=work, pages=pages, engine=engine, model=model, effort=effort, glossary_path=None)
+    translate_cmd(
+        work=work, pages=pages, engine=engine, model=model, effort=effort,
+        temperature=temperature, base_url=base_url, glossary_path=None,
+    )
     render_cmd(out=out, work=work, pages=pages, pdf=pdf, subset=subset, min_scale=MIN_SCALE)
 
 
@@ -236,6 +335,8 @@ def run(
 app.command("extract")(extract_cmd)
 app.command("classify")(classify_cmd)
 app.command("translate")(translate_cmd)
+app.command("export")(export_cmd)
+app.command("import-fr")(import_cmd)
 app.command("render")(render_cmd)
 app.command("report")(report_cmd)
 

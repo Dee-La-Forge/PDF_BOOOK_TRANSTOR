@@ -57,11 +57,30 @@ DejaVu Serif) sont copiées automatiquement depuis le système : les
 sous-ensembles embarqués dans le PDF n'ont pas les glyphes accentués, puisque
 l'original est en anglais.
 
-Pour l'étape `translate`, une clé API est nécessaire :
+Les clés API se posent dans l'environnement, ou dans un fichier `.env` à la
+racine — exclu du dépôt, et lu automatiquement :
 
-```powershell
-setx ANTHROPIC_API_KEY "sk-ant-..."
 ```
+ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=sk-...
+```
+
+## Moteurs de traduction
+
+| `--engine` | Ce que c'est | Coût pour le livre entier |
+|---|---|---|
+| `claude` | API Anthropic, schéma de sortie contraint, cache du prompt système | 10-15 $ (Opus 5), 4-6 $ (Sonnet 5) |
+| `deepseek` | API DeepSeek, compatible OpenAI | < 1 $ |
+| `ollama` | Modèle local, rien ne sort de la machine | gratuit, mais lent |
+| `fake` | Texte accentué 18 % plus long | gratuit |
+
+Tous partagent le même socle : composition des lots, contrôle des marqueurs et
+des budgets, reprise des blocs fautifs. Un moteur moins docile dégrade donc en
+reprises supplémentaires — visibles dans le rapport — et non en sortie
+corrompue silencieusement.
+
+`--base-url` permet de viser n'importe quel service compatible OpenAI, et
+`--model` de choisir le modèle servi.
 
 ## Utilisation
 
@@ -78,6 +97,20 @@ py -m frogger translate --engine claude --model claude-opus-5 --effort medium
 py -m frogger render    --out out/ch7.pdf --subset
 py -m frogger report
 ```
+
+### Traduction hors pipeline
+
+`export` et `import-fr` ouvrent la chaîne à n'importe quel traducteur — un
+autre outil, une session Claude Code, ou un relecteur humain :
+
+```powershell
+py -m frogger export    --out data/work/a_traduire.json
+#  … le fichier est traduit par le moyen de votre choix, champ « fr » …
+py -m frogger import-fr --in  data/work/traduit.json
+```
+
+C'est la voie utilisée pour la traduction de référence du chapitre 7 : aucun
+appel API, et le résultat entre dans le cache comme n'importe quel autre.
 
 ### Mise au point sans dépense
 
@@ -118,26 +151,25 @@ Si tout cela ne suffit pas, le texte est inséré à l'échelle nécessaire, aus
 petite soit-elle, et le bloc est signalé dans `reports/rendu.csv`. **Aucun
 texte n'est jamais tronqué ni perdu silencieusement.**
 
-## Résultats sur le chapitre 7 (11 pages, moteur factice à +18 %)
+## Résultats sur le chapitre 7
+
+**Traduction réelle**, pages 130-136 (`out/ch7_fr.pdf`) :
 
 | | |
 |---|---|
-| Blocs extraits | 107 |
-| Blocs traduits | 78 |
+| Blocs traduits | 50 |
 | Rendus au corps d'origine | 45 |
-| Compressés (95-80 %) | 28 |
-| Tassés (< 80 %) | 5 |
+| Compressés (95-87 %) | 5 |
 | **Non insérés** | **0** |
 
-Les cinq blocs tassés sont tous sur la page de bibliographie, où les entrées
-sont serrées sans gouttière exploitable.
+**Test de charge** au moteur factice (+18 % imposés à *tous* les blocs, y
+compris les titres courts), pages 130-140 : 78 blocs traduits, 45 au corps
+d'origine, 28 compressés, 5 tassés, 0 non inséré. Les cinq blocs tassés sont
+tous sur la page de bibliographie, où les entrées sont serrées sans gouttière
+exploitable.
 
-## Coût
-
-Aux tarifs Claude Opus 5 (5 $ / 25 $ par million de tokens), avec mise en cache
-du prompt système : **de l'ordre de 10 à 15 $ pour les 393 pages**. Environ
-trois fois moins en `--model claude-sonnet-5`. Un chapitre coûte quelques
-dizaines de centimes.
+L'écart entre les deux mesures tient au budget de caractères : une vraie
+traduction française le respecte, le moteur factice le viole par construction.
 
 ## Limites connues
 

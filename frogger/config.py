@@ -63,6 +63,22 @@ SYMBOL_FAMILY = "booksym"
 OPTIONAL_VARIANTS = ("mono", "symbol")
 
 
+def load_env(path: Path | None = None) -> None:
+    """Charge un fichier .env s'il existe, sans écraser l'environnement en place.
+
+    Les clés API vivent là plutôt que dans le code : `.env` est exclu du dépôt.
+    """
+    path = path or Path.cwd() / ".env"
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
 def ensure_fonts(dest: Path) -> dict[str, str]:
     """Copie les 4 variantes de la police de substitution dans `dest`.
 

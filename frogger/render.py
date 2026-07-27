@@ -24,7 +24,7 @@ from .config import (
     Workspace,
     ensure_fonts,
 )
-from .models import Block, RenderStat
+from .models import Block, Kind, RenderStat
 
 #: Interlignes de réserve accordés en plus de la hauteur strictement nécessaire,
 #: pour absorber l'allongement du français.
@@ -117,7 +117,10 @@ def block_html(block: Block, font: fitz.Font | None = None) -> str:
 
     size = max(block.size, 1.0)
     leading = min(max(block.line_height / size, 1.0), 1.6)
-    style = f"font-size:{size:.2f}pt;line-height:{leading:.3f};text-align:{block.align};"
+    # Un titre justifié s'étire disgracieusement dès qu'il passe à la ligne :
+    # la justification n'a de sens que sur du texte courant.
+    align = block.align if block.kind is Kind.PROSE else ("center" if block.align == "center" else "left")
+    style = f"font-size:{size:.2f}pt;line-height:{leading:.3f};text-align:{align};"
     if block.indent > 1.0:
         style += f"text-indent:{block.indent:.1f}pt;"
     return f'<p style="{style}">{body}</p>'

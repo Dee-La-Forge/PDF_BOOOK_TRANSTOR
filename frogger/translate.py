@@ -1,4 +1,4 @@
-"""Étape 3 — traduction des blocs de prose via l'API Claude.
+"""Étape 3 — traduction des blocs de prose.
 
 Deux particularités par rapport à un appel de traduction ordinaire :
 
@@ -7,16 +7,22 @@ Deux particularités par rapport à un appel de traduction ordinaire :
   court plutôt que de laisser déborder la mise en page ;
 * **fragments protégés** — les identifiants de code et symboles mathématiques
   rencontrés au fil du texte sont masqués par des marqueurs ⟦n⟧ que le modèle
-  doit restituer tels quels. Une passe de vérification rejette toute réponse
-  qui en perd un.
+  doit restituer tels quels.
+
+Une passe de vérification rejette toute réponse qui perd un marqueur ou
+dépasse largement son budget, et renvoie les seuls blocs fautifs au modèle.
+C'est ce contrôle qui rend le pipeline tolérant à un moteur moins docile : un
+modèle plus faible dégrade en reprises supplémentaires, pas en sortie
+corrompue silencieusement.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from .config import DEFAULT_EFFORT, DEFAULT_MODEL, PH_CLOSE, PH_OPEN
 from .glossary import Glossary
@@ -25,12 +31,26 @@ from .store import Store, cache_key
 
 _PLACEHOLDER_RE = re.compile(f"{PH_OPEN}(\\d+){PH_CLOSE}")
 
-#: Tarifs API en dollars par million de tokens (entrée, sortie).
-_PRICES = {
-    "claude-opus-5": (5.0, 25.0),
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-sonnet-5": (3.0, 15.0),
-    "claude-haiku-4-5": (1.0, 5.0),
+
+@dataclass(frozen=True)
+class Pricing:
+    """Tarifs en dollars par million de tokens."""
+
+    input: float        # entrée non mise en cache
+    output: float
+    cache_read: float   # token servi par le cache
+    cache_write: float  # token écrit en cache
+
+
+#: Anthropic facture la lecture de cache à 0,1x et l'écriture à 1,25x l'entrée.
+#: DeepSeek ne surfacture pas l'écriture : un cache manqué coûte le prix normal.
+PRICES: dict[str, Pricing] = {
+    "claude-opus-5": Pricing(5.0, 25.0, 0.5, 6.25),
+    "claude-opus-4-8": Pricing(5.0, 25.0, 0.5, 6.25),
+    "claude-sonnet-5": Pricing(3.0, 15.0, 0.3, 3.75),
+    "claude-haiku-4-5": Pricing(1.0, 5.0, 0.1, 1.25),
+    "deepseek-v4-pro": Pricing(0.435, 0.87, 0.003625, 0.435),
+    "deepseek-v4-flash": Pricing(0.14, 0.28, 0.0028, 0.14),
 }
 
 SYSTEM_RULES = """\
@@ -59,17 +79,20 @@ Règles impératives :
    périphrases. Ne tronque jamais le sens pour gagner de la place.
 """
 
-_SCHEMA = {
+_RESPONSE_EXAMPLE = (
+    'Format de réponse, en json strict et rien d\'autre :\n'
+    '{"translations": [{"id": "p0130-b002", "fr": "…"}, {"id": "p0130-b003", "fr": "…"}]}'
+)
+
+#: Schéma strict, exploité par les moteurs qui savent le contraindre.
+RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "translations": {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "fr": {"type": "string"},
-                },
+                "properties": {"id": {"type": "string"}, "fr": {"type": "string"}},
                 "required": ["id", "fr"],
                 "additionalProperties": False,
             },
@@ -98,75 +121,56 @@ class Usage:
     repairs: int = 0
 
     def cost_usd(self, model: str) -> float:
-        price_in, price_out = _PRICES.get(model, (0.0, 0.0))
-        billed_in = self.input_tokens + 1.25 * self.cache_write + 0.1 * self.cache_read
-        return (billed_in * price_in + self.output_tokens * price_out) / 1_000_000
+        price = PRICES.get(model)
+        if price is None:
+            return 0.0
+        total = (
+            self.input_tokens * price.input
+            + self.cache_read * price.cache_read
+            + self.cache_write * price.cache_write
+            + self.output_tokens * price.output
+        )
+        return total / 1_000_000
 
 
 class Translator(Protocol):
     name: str
+    model_id: str
+    profile: str
+    usage: Usage
 
     def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]: ...
 
 
-# --- moteur factice ----------------------------------------------------------
-
-_ACCENTS = str.maketrans({"e": "é", "a": "à", "u": "ù", "i": "î", "o": "ô", "c": "ç"})
-_FILLER = "afin de mesurer précisément cette grandeur dans le cadre considéré "
+# --- socle commun ------------------------------------------------------------
 
 
-class FakeTranslator:
-    """Moteur d'essai : produit un texte accentué ~18 % plus long que la source.
+class LLMTranslator:
+    """Composition des lots, vérification et reprise, communes à tous les moteurs."""
 
-    Sert à éprouver le rendu — couverture des accents, débordements, réduction
-    d'échelle — sans clé API ni dépense.
-    """
+    name = "llm"
 
-    name = "fake"
+    #: Nombre maximal de blocs par appel. `None` = toute la page d'un coup.
+    #: Un modèle modeste tient mal un long JSON : le découpage lui évite de
+    #: perdre des blocs en cours de route.
+    batch_size: int | None = None
 
-    def __init__(self, expansion: float = 1.18):
-        self.expansion = expansion
-
-    def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
-        out: dict[str, str] = {}
-        for block in blocks:
-            target = int(len(block.text) * self.expansion)
-            # On n'accentue que hors marqueurs, pour les restituer intacts.
-            parts = _PLACEHOLDER_RE.split(block.text)
-            rebuilt: list[str] = []
-            for i, part in enumerate(parts):
-                rebuilt.append(f"{PH_OPEN}{part}{PH_CLOSE}" if i % 2 else part.translate(_ACCENTS))
-            text = "".join(rebuilt)
-            while len(text) < target:
-                text += " " + _FILLER[: target - len(text)]
-            out[block.id] = text.strip()
-        return out
-
-
-# --- moteur Claude -----------------------------------------------------------
-
-
-class ClaudeTranslator:
-    """Traduction par lots : un appel API par page, contexte glissant."""
-
-    name = "claude"
-
-    def __init__(
-        self,
-        glossary: Glossary,
-        model: str = DEFAULT_MODEL,
-        effort: str = DEFAULT_EFFORT,
-        max_tokens: int = 16000,
-    ):
-        import anthropic  # importé tardivement : inutile pour le moteur factice
-
-        self.client = anthropic.Anthropic()
+    def __init__(self, glossary: Glossary, model: str, max_tokens: int = 16000):
         self.glossary = glossary
-        self.model = model
-        self.effort = effort
+        self.model_id = model
         self.max_tokens = max_tokens
         self.usage = Usage()
-        self._system = f"{SYSTEM_RULES}\n\n{glossary.as_prompt()}"
+        self.system = f"{SYSTEM_RULES}\n\n{glossary.as_prompt()}"
+
+    @property
+    def profile(self) -> str:
+        return ""
+
+    def _complete(self, user: str) -> str:
+        """Renvoie la réponse brute du modèle. À spécialiser."""
+        raise NotImplementedError
+
+    # --- composition ---------------------------------------------------------
 
     def _payload(self, blocks: Sequence[Block], context: str, note: str = "") -> str:
         items = [
@@ -179,61 +183,35 @@ class ClaudeTranslator:
             for b in blocks
         ]
         head = (
-            f"Contexte amont déjà traduit (pour la cohérence terminologique, ne pas retraduire) :\n"
-            f"{context or '(début de la sélection)'}\n\n"
+            "Contexte amont déjà traduit (pour la cohérence terminologique, "
+            f"ne pas retraduire) :\n{context or '(début de la sélection)'}\n\n"
         )
         tail = f"\n\n{note}" if note else ""
         return (
             head
-            + "Traduis chaque bloc ci-dessous. Renvoie un objet JSON contenant un "
-            + "tableau `translations` avec un couple {id, fr} par bloc, dans le même ordre.\n\n"
+            + "Traduis chaque bloc ci-dessous, un couple {id, fr} par bloc, dans le même ordre.\n"
+            + _RESPONSE_EXAMPLE
+            + "\n\n"
             + json.dumps(items, ensure_ascii=False, indent=1)
             + tail
         )
 
-    def _call(self, blocks: Sequence[Block], context: str, note: str = "") -> dict[str, str]:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=[{"type": "text", "text": self._system, "cache_control": {"type": "ephemeral"}}],
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}, "effort": self.effort},
-            messages=[{"role": "user", "content": self._payload(blocks, context, note)}],
-        )
-
-        u = response.usage
-        self.usage.requests += 1
-        self.usage.input_tokens += getattr(u, "input_tokens", 0) or 0
-        self.usage.output_tokens += getattr(u, "output_tokens", 0) or 0
-        self.usage.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
-        self.usage.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
-
-        if response.stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            raise RuntimeError(f"Requête refusée par le modèle ({getattr(details, 'category', '?')}).")
-
-        text = next((b.text for b in response.content if b.type == "text"), "")
+    @staticmethod
+    def _parse(raw: str) -> dict[str, str]:
+        text = raw.strip()
         if not text:
-            raise RuntimeError("Réponse vide du modèle.")
+            raise RuntimeError("réponse vide du modèle")
+        # Certains moteurs encadrent le JSON d'une clôture Markdown.
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text)
         data = json.loads(text)
         return {item["id"]: item["fr"] for item in data["translations"]}
 
-    def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
-        result = self._call(blocks, context)
-        faulty = self._check(blocks, result)
-        if faulty:
-            self.usage.repairs += 1
-            note = (
-                "Reprise : les blocs suivants sont à corriger. "
-                + " ".join(faulty.values())
-                + " Renvoie uniquement ces blocs."
-            )
-            subset = [b for b in blocks if b.id in faulty]
-            result.update(self._call(subset, context, note))
-        return result
+    # --- contrôle ------------------------------------------------------------
 
     @staticmethod
     def _check(blocks: Sequence[Block], result: dict[str, str]) -> dict[str, str]:
-        """Repère les traductions manquantes, tronquées ou ayant perdu un marqueur."""
+        """Repère les traductions manquantes, trop longues ou ayant perdu un marqueur."""
         problems: dict[str, str] = {}
         for block in blocks:
             fr = result.get(block.id)
@@ -253,6 +231,234 @@ class ClaudeTranslator:
                 )
         return problems
 
+    def _translate_chunk(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
+        result = self._parse(self._complete(self._payload(blocks, context)))
+        faulty = self._check(blocks, result)
+        if faulty:
+            self.usage.repairs += 1
+            note = (
+                "Reprise : les blocs suivants sont à corriger. "
+                + " ".join(faulty.values())
+                + " Renvoie uniquement ces blocs."
+            )
+            subset = [b for b in blocks if b.id in faulty]
+            try:
+                result.update(self._parse(self._complete(self._payload(subset, context, note))))
+            except Exception:  # noqa: BLE001 — on garde le premier jet
+                pass
+        return result
+
+    def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
+        if not self.batch_size or len(blocks) <= self.batch_size:
+            return self._translate_chunk(blocks, context)
+
+        result: dict[str, str] = {}
+        for start in range(0, len(blocks), self.batch_size):
+            chunk = blocks[start : start + self.batch_size]
+            result.update(self._translate_chunk(chunk, context))
+            tail = " ".join(result[b.id] for b in chunk if b.id in result)
+            context = tail[-400:] or context
+        return result
+
+
+# --- moteur factice ----------------------------------------------------------
+
+_ACCENTS = str.maketrans({"e": "é", "a": "à", "u": "ù", "i": "î", "o": "ô", "c": "ç"})
+_FILLER = "afin de mesurer précisément cette grandeur dans le cadre considéré "
+
+
+class FakeTranslator:
+    """Moteur d'essai : produit un texte accentué ~18 % plus long que la source.
+
+    Sert à éprouver le rendu — couverture des accents, débordements, réduction
+    d'échelle — sans clé API ni dépense.
+    """
+
+    name = "fake"
+    model_id = "fake"
+
+    def __init__(self, expansion: float = 1.18):
+        self.expansion = expansion
+        self.usage = Usage()
+
+    @property
+    def profile(self) -> str:
+        return f"x{self.expansion}"
+
+    def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for block in blocks:
+            target = int(len(block.text) * self.expansion)
+            # On n'accentue que hors marqueurs, pour les restituer intacts.
+            parts = _PLACEHOLDER_RE.split(block.text)
+            rebuilt = [
+                f"{PH_OPEN}{part}{PH_CLOSE}" if index % 2 else part.translate(_ACCENTS)
+                for index, part in enumerate(parts)
+            ]
+            text = "".join(rebuilt)
+            while len(text) < target:
+                text += " " + _FILLER[: target - len(text)]
+            out[block.id] = text.strip()
+        return out
+
+
+# --- moteur Claude -----------------------------------------------------------
+
+
+class ClaudeTranslator(LLMTranslator):
+    """API Anthropic : schéma de sortie contraint et mise en cache du système."""
+
+    name = "claude"
+
+    def __init__(
+        self,
+        glossary: Glossary,
+        model: str = DEFAULT_MODEL,
+        effort: str = DEFAULT_EFFORT,
+        max_tokens: int = 16000,
+    ):
+        import anthropic  # importé tardivement : inutile pour les autres moteurs
+
+        super().__init__(glossary, model, max_tokens)
+        self.client = anthropic.Anthropic()
+        self.effort = effort
+
+    @property
+    def profile(self) -> str:
+        return self.effort
+
+    def _complete(self, user: str) -> str:
+        response = self.client.messages.create(
+            model=self.model_id,
+            max_tokens=self.max_tokens,
+            system=[{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
+            output_config={
+                "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
+                "effort": self.effort,
+            },
+            messages=[{"role": "user", "content": user}],
+        )
+
+        u = response.usage
+        self.usage.requests += 1
+        self.usage.input_tokens += getattr(u, "input_tokens", 0) or 0
+        self.usage.output_tokens += getattr(u, "output_tokens", 0) or 0
+        self.usage.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
+        self.usage.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
+
+        if response.stop_reason == "refusal":
+            details = getattr(response, "stop_details", None)
+            raise RuntimeError(f"requête refusée ({getattr(details, 'category', '?')})")
+
+        return next((b.text for b in response.content if b.type == "text"), "")
+
+
+# --- moteur DeepSeek ---------------------------------------------------------
+
+
+class OpenAICompatTranslator(LLMTranslator):
+    """Socle pour tout service exposant l'API chat/completions d'OpenAI.
+
+    Couvre DeepSeek et Ollama. Aucun de ces services ne contraint la sortie par
+    un schéma strict — au mieux un mode `json_object` — d'où l'analyse
+    défensive de la réponse. Le contrôle des marqueurs du socle commun sert de
+    garde-fou : un modèle moins docile dégrade en reprises, pas en silence.
+    """
+
+    name = "openai-compat"
+
+    default_base_url = ""
+    default_model = ""
+    api_key_env = ""          # vide = service local, sans authentification
+    timeout = 120.0
+    DEFAULT_TEMPERATURE = 1.0
+
+    def __init__(
+        self,
+        glossary: Glossary,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int = 8000,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
+        from openai import OpenAI  # importé tardivement
+
+        super().__init__(glossary, model or self.default_model, max_tokens)
+        key = api_key or (os.environ.get(self.api_key_env) if self.api_key_env else None)
+        if self.api_key_env and not key:
+            raise RuntimeError(
+                f"{self.api_key_env} absente de l'environnement (ou du fichier .env)."
+            )
+        self.client = OpenAI(
+            api_key=key or "sans-objet",
+            base_url=base_url or self.default_base_url,
+            timeout=self.timeout,
+        )
+        self.temperature = self.DEFAULT_TEMPERATURE if temperature is None else temperature
+
+    @property
+    def profile(self) -> str:
+        return f"t{self.temperature}"
+
+    def _record(self, usage: Any) -> None:
+        self.usage.requests += 1
+        if usage is None:
+            return
+        hit = getattr(usage, "prompt_cache_hit_tokens", None)
+        miss = getattr(usage, "prompt_cache_miss_tokens", None)
+        if hit is None or miss is None:
+            self.usage.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+        else:
+            self.usage.input_tokens += miss or 0
+            self.usage.cache_read += hit or 0
+        self.usage.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+
+    def _complete(self, user: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model_id,
+            messages=[
+                {"role": "system", "content": self.system},
+                {"role": "user", "content": user},
+            ],
+            response_format={"type": "json_object"},
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        self._record(response.usage)
+        return response.choices[0].message.content or ""
+
+
+class DeepSeekTranslator(OpenAICompatTranslator):
+    """API DeepSeek."""
+
+    name = "deepseek"
+    default_base_url = "https://api.deepseek.com"
+    default_model = "deepseek-v4-pro"
+    api_key_env = "DEEPSEEK_API_KEY"
+
+    #: Barème DeepSeek : 0.0 pour le code, 1.0 pour l'extraction de données,
+    #: 1.3 pour la traduction. Notre tâche est une traduction sous contrainte
+    #: de format strict, d'où la valeur intermédiaire.
+    DEFAULT_TEMPERATURE = 1.0
+
+
+class OllamaTranslator(OpenAICompatTranslator):
+    """Modèle servi localement par Ollama : gratuit, et rien ne sort de la machine.
+
+    Les lots sont volontairement courts et la température basse : un modèle de
+    7 à 12 milliards de paramètres tient mal un long JSON et perd facilement un
+    marqueur. La génération locale étant lente, le délai d'attente est large.
+    """
+
+    name = "ollama"
+    default_base_url = "http://localhost:11434/v1"
+    default_model = "gemma4:latest"
+    api_key_env = ""
+    timeout = 900.0
+    batch_size = 5
+    DEFAULT_TEMPERATURE = 0.3
+
 
 # --- orchestration -----------------------------------------------------------
 
@@ -268,8 +474,6 @@ def translate_blocks(
     translator: Translator,
     store: Store,
     glossary_digest: str,
-    model_id: str,
-    effort: str,
     context_chars: int = 400,
     progress=None,
 ) -> TranslationRun:
@@ -278,9 +482,11 @@ def translate_blocks(
     Les blocs déjà présents en cache ne repartent pas à l'API : une reprise
     après interruption ne repaie que ce qui manque.
     """
-    run = TranslationRun()
-    usage = getattr(translator, "usage", run.usage)
-    run.usage = usage
+    run = TranslationRun(usage=translator.usage)
+    model_id, profile = translator.model_id, translator.profile
+
+    def key_for(block: Block) -> str:
+        return cache_key(model_id, profile, glossary_digest, block.char_budget, block.text)
 
     by_page: dict[int, list[Block]] = {}
     for block in blocks:
@@ -293,11 +499,10 @@ def translate_blocks(
 
         pending: list[Block] = []
         for block in page_blocks:
-            key = cache_key(model_id, effort, glossary_digest, block.char_budget, block.text)
-            hit = store.cached(key)
+            hit = store.cached(key_for(block))
             if hit is not None:
                 block.fr = hit
-                usage.cached_blocks += 1
+                translator.usage.cached_blocks += 1
             else:
                 pending.append(block)
 
@@ -313,9 +518,8 @@ def translate_blocks(
                     run.errors.append(f"{block.id} : aucune traduction renvoyée")
                     continue
                 block.fr = fr
-                usage.translated_blocks += 1
-                key = cache_key(model_id, effort, glossary_digest, block.char_budget, block.text)
-                store.cache_put(key, fr, model_id)
+                translator.usage.translated_blocks += 1
+                store.cache_put(key_for(block), fr, model_id)
 
         store.put_blocks(page_blocks)
         tail = " ".join(b.fr for b in page_blocks if b.fr)
