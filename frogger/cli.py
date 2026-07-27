@@ -16,6 +16,7 @@ from .config import (
     DEFAULT_EFFORT,
     DEFAULT_MODEL,
     MIN_SCALE,
+    SERIF_FAMILIES,
     Workspace,
     load_env,
     match_serif,
@@ -320,6 +321,9 @@ def render_cmd(
     pdf: Optional[Path] = typer.Option(None, "--pdf", help="PDF source (sinon celui de `extract`)."),
     subset: bool = typer.Option(False, "--subset", help="N'exporter que les pages traitées."),
     min_scale: float = typer.Option(MIN_SCALE, "--min-scale", help="Réduction d'échelle maximale."),
+    serif: Optional[str] = typer.Option(
+        None, "--serif", help=f"Police de substitution : {' | '.join(SERIF_FAMILIES)}."
+    ),
 ):
     """Supprime le texte anglais et réinsère le français dans le PDF."""
     selection = parse_pages(pages)
@@ -331,7 +335,9 @@ def render_cmd(
             console.print("[yellow]Aucun bloc traduit — lancez d'abord `translate`.[/yellow]")
             raise typer.Exit(1)
 
-        serif = match_serif(store.get_meta("serif_font"))
+        serif = serif or match_serif(store.get_meta("serif_font"))
+        if serif not in SERIF_FAMILIES:
+            raise typer.BadParameter(f"--serif attend l'un de : {', '.join(SERIF_FAMILIES)}")
         console.print(f"Police de substitution : [cyan]{serif}[/cyan]")
         stats = render_pdf(
             source, out, blocks, workspace, min_scale=min_scale, subset=subset, serif=serif

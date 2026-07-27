@@ -67,10 +67,17 @@ DEFAULT_SERIF = "times"
 
 #: Correspondance entre la police de labeur du PDF source et la substitution la
 #: plus proche parmi celles disponibles. Le premier fragment trouvé l'emporte.
+#:
+#: Deux critères s'opposent : la ressemblance et l'encombrement. Mesuré sur le
+#: chapitre 1 d'« Algorithmic Trading », composé en Perpetua — blocs rendus au
+#: corps d'origine puis tassés sous 80 % : Times 29/97, Constantia 22/120,
+#: Palatino 22/127, Georgia 21/126. Times est la plus étroite des quatre, donc
+#: celle qui laisse le plus de texte à sa taille d'origine. Les faces claires et
+#: étroites lui sont renvoyées ; celles qui ont leur équivalent exact le gardent.
 SERIF_MATCH: tuple[tuple[str, str], ...] = (
-    ("perpetua", "constantia"),   # humanistes étroites, même couleur de page
-    ("garamond", "constantia"),
-    ("minion", "constantia"),
+    ("perpetua", "times"),
+    ("garamond", "times"),
+    ("minion", "times"),
     ("constantia", "constantia"),
     ("palatino", "palatino"),
     ("book antiqua", "palatino"),
