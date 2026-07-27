@@ -212,22 +212,24 @@ def _insert(
     d'échelle libre : mieux vaut un paragraphe visiblement tassé, signalé dans
     le rapport, qu'un paragraphe disparu sans bruit.
     """
-    try:
-        spare, scale = page.insert_htmlbox(rect, html, css=css, archive=archive, scale_low=min_scale)
-    except Exception as exc:  # noqa: BLE001
-        return -1.0, 0.0, f"echec insertion: {exc}"
+    # Le plancher d'échelle est tenté en premier, puis la réduction libre. Une
+    # exception vaut échec de la tentative, pas de l'insertion : PyMuPDF refuse
+    # une échelle calculée à 0.8799999999999999 pour un plancher à 0.88, simple
+    # artefact de représentation flottante. Renoncer là-dessus perdrait le bloc.
+    failure = ""
+    for scale_low, libre in ((min_scale, False), (0, True)):
+        try:
+            spare, scale = page.insert_htmlbox(
+                rect, html, css=css, archive=archive, scale_low=scale_low
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = str(exc)
+            continue
+        if spare >= 0:
+            return float(spare), float(scale), f"reduction libre a {scale:.0%}" if libre else ""
+        failure = "ne tient pas dans le rectangle"
 
-    if spare >= 0:
-        return float(spare), float(scale), ""
-
-    try:
-        spare, scale = page.insert_htmlbox(rect, html, css=css, archive=archive, scale_low=0)
-    except Exception as exc:  # noqa: BLE001
-        return -1.0, 0.0, f"echec insertion: {exc}"
-
-    if spare < 0:
-        return float(spare), float(scale), "TEXTE NON INSERE - a reprendre a la main"
-    return float(spare), float(scale), f"reduction libre a {scale:.0%}"
+    return -1.0, 0.0, f"TEXTE NON INSERE - a reprendre a la main ({failure})"
 
 
 # --- rendu -------------------------------------------------------------------
