@@ -39,11 +39,12 @@ _HEADING_SIZE_RATIO = 1.12
 _HEADING_MAX_CHARS = 220
 _RUNNING_HEAD_MAX_CHARS = 120
 
-#: Longueur au-delà de laquelle un bloc cerné d'un filet n'est plus une cellule.
-#: La détection de tableaux repère les traits, donc aussi les encadrés : chez
-#: Chan, « BOX 1.1 » et ses 1 100 caractères de prose passaient pour un tableau
-#: et échappaient à la traduction.
-_TABLE_MAX_CHARS = 200
+#: Une cellule de tableau est brève et ne fait pas une phrase. La détection de
+#: tableaux repère des traits, donc aussi les filets d'encadré : chez Chan,
+#: « BOX 1.1 » et ses 1 100 caractères de prose, puis les listes de synthèse de
+#: fin de chapitre, passaient pour des cellules et échappaient à la traduction.
+_TABLE_MAX_CHARS = 60
+_TABLE_MAX_WORDS = 6
 
 
 def _near_edge(block: Block) -> bool:
@@ -90,8 +91,6 @@ def classify_block(block: Block, base_size: float) -> Kind:
     fam = block.features.get("fam", {})
     text = block.text.strip()
 
-    if block.features.get("in_table") and len(text) <= _TABLE_MAX_CHARS:
-        return Kind.TABLE
     if _is_folio(block):
         return Kind.CHROME
     if fam.get("code", 0.0) >= _CODE_RATIO:
@@ -99,9 +98,18 @@ def classify_block(block: Block, base_size: float) -> Kind:
     if fam.get("math", 0.0) >= _MATH_RATIO:
         return Kind.MATH
 
-    # Un bloc sans mot à traduire (numéros seuls, symboles) reste intact.
+    # Un bloc sans mot à traduire (numéros seuls, symboles) reste intact. Ce tri
+    # précède celui des tableaux : une cellule chiffrée ne doit jamais partir au
+    # traducteur, quelle que soit la grille qui l'entoure.
     if not re.search(r"[A-Za-z]{2}", text):
         return Kind.LABEL
+
+    if (
+        block.features.get("in_table")
+        and len(text) <= _TABLE_MAX_CHARS
+        and len(text.split()) <= _TABLE_MAX_WORDS
+    ):
+        return Kind.TABLE
 
     if _is_running_head(block, base_size):
         return Kind.HEADING
