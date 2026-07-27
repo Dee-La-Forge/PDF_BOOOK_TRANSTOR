@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 import fitz
 
 from .config import (
+    DEFAULT_SERIF,
     FONT_FAMILY,
     MIN_SCALE,
     MONO_FAMILY,
@@ -242,8 +243,9 @@ def render(
     workspace: Workspace,
     min_scale: float = MIN_SCALE,
     subset: bool = False,
+    serif: str = DEFAULT_SERIF,
 ) -> list[RenderStat]:
-    fonts = ensure_fonts(workspace.fonts)
+    fonts = ensure_fonts(workspace.fonts, serif)
     css = build_css(fonts)
     archive = fitz.Archive(workspace.fonts)
     try:

@@ -39,6 +39,12 @@ _HEADING_SIZE_RATIO = 1.12
 _HEADING_MAX_CHARS = 220
 _RUNNING_HEAD_MAX_CHARS = 120
 
+#: Longueur au-delà de laquelle un bloc cerné d'un filet n'est plus une cellule.
+#: La détection de tableaux repère les traits, donc aussi les encadrés : chez
+#: Chan, « BOX 1.1 » et ses 1 100 caractères de prose passaient pour un tableau
+#: et échappaient à la traduction.
+_TABLE_MAX_CHARS = 200
+
 
 def _near_edge(block: Block) -> bool:
     f = block.features
@@ -84,7 +90,7 @@ def classify_block(block: Block, base_size: float) -> Kind:
     fam = block.features.get("fam", {})
     text = block.text.strip()
 
-    if block.features.get("in_table"):
+    if block.features.get("in_table") and len(text) <= _TABLE_MAX_CHARS:
         return Kind.TABLE
     if _is_folio(block):
         return Kind.CHROME

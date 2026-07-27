@@ -53,10 +53,17 @@ PRICES: dict[str, Pricing] = {
     "deepseek-v4-flash": Pricing(0.14, 0.28, 0.0028, 0.14),
 }
 
+def describe_book(title: str = "", author: str = "") -> str:
+    if title and author:
+        return f"« {title} », de {author}"
+    if title:
+        return f"« {title} »"
+    return "un ouvrage technique de finance quantitative"
+
+
 SYSTEM_RULES = """\
-Tu traduis un ouvrage technique d'anglais en français : « Advances in Financial
-Machine Learning » de Marcos López de Prado. Le lectorat est composé de
-quants et d'ingénieurs financiers.
+Tu traduis un ouvrage technique d'anglais en français : {ouvrage}. Le lectorat
+est composé de quants et d'ingénieurs financiers.
 
 Registre : français technique et académique, précis, sans lourdeur. Emploie
 les conventions typographiques françaises (guillemets « », espace insécable
@@ -166,6 +173,7 @@ class LLMTranslator:
         model: str,
         max_tokens: int = 16000,
         length_tolerance: float | None = None,
+        book: str = "",
     ):
         self.glossary = glossary
         self.model_id = model
@@ -174,7 +182,8 @@ class LLMTranslator:
             self.DEFAULT_LENGTH_TOLERANCE if length_tolerance is None else length_tolerance
         )
         self.usage = Usage()
-        self.system = f"{SYSTEM_RULES}\n\n{glossary.as_prompt()}"
+        rules = SYSTEM_RULES.format(ouvrage=book or describe_book())
+        self.system = f"{rules}\n\n{glossary.as_prompt()}"
         #: Blocs dont la reprise a échoué : acceptés faute de mieux, mais
         #: signalés — une traduction fautive acceptée en silence est pire
         #: qu'une traduction manquante.
@@ -353,10 +362,11 @@ class ClaudeTranslator(LLMTranslator):
         effort: str = DEFAULT_EFFORT,
         max_tokens: int = 16000,
         length_tolerance: float | None = None,
+        book: str = "",
     ):
         import anthropic  # importé tardivement : inutile pour les autres moteurs
 
-        super().__init__(glossary, model, max_tokens, length_tolerance)
+        super().__init__(glossary, model, max_tokens, length_tolerance, book)
         self.client = anthropic.Anthropic()
         self.effort = effort
 
@@ -419,10 +429,13 @@ class OpenAICompatTranslator(LLMTranslator):
         base_url: str | None = None,
         api_key: str | None = None,
         length_tolerance: float | None = None,
+        book: str = "",
     ):
         from openai import OpenAI  # importé tardivement
 
-        super().__init__(glossary, model or self.default_model, max_tokens, length_tolerance)
+        super().__init__(
+            glossary, model or self.default_model, max_tokens, length_tolerance, book
+        )
         key = api_key or (os.environ.get(self.api_key_env) if self.api_key_env else None)
         if self.api_key_env and not key:
             raise RuntimeError(

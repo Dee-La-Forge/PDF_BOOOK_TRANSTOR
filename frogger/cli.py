@@ -12,7 +12,14 @@ from rich.table import Table
 
 from . import report as reporting
 from .classify import classify, summary
-from .config import DEFAULT_EFFORT, DEFAULT_MODEL, MIN_SCALE, Workspace, load_env
+from .config import (
+    DEFAULT_EFFORT,
+    DEFAULT_MODEL,
+    MIN_SCALE,
+    Workspace,
+    load_env,
+    match_serif,
+)
 from .extract import extract
 from .glossary import Glossary, load_glossary
 from .render import render as render_pdf
@@ -22,6 +29,7 @@ from .translate import (
     DeepSeekTranslator,
     FakeTranslator,
     OllamaTranslator,
+    describe_book,
     translate_blocks,
 )
 
@@ -81,6 +89,7 @@ def build_translator(
     temperature: Optional[float],
     base_url: Optional[str],
     length_tolerance: Optional[float] = None,
+    book: str = "",
 ):
     """`model` vaut le défaut Claude tant que l'utilisateur ne l'a pas changé :
     on ne le transmet donc qu'aux moteurs auxquels il correspond."""
@@ -90,17 +99,18 @@ def build_translator(
         return FakeTranslator()
     if engine == "claude":
         return ClaudeTranslator(
-            glossary, model=model, effort=effort, length_tolerance=length_tolerance
+            glossary, model=model, effort=effort,
+            length_tolerance=length_tolerance, book=book,
         )
     if engine == "deepseek":
         return DeepSeekTranslator(
             glossary, model=custom_model, temperature=temperature,
-            base_url=base_url, length_tolerance=length_tolerance,
+            base_url=base_url, length_tolerance=length_tolerance, book=book,
         )
     if engine == "ollama":
         return OllamaTranslator(
             glossary, model=custom_model, temperature=temperature,
-            base_url=base_url, length_tolerance=length_tolerance,
+            base_url=base_url, length_tolerance=length_tolerance, book=book,
         )
     raise typer.BadParameter(f"--engine attend l'un de : {', '.join(ENGINES)}.")
 
@@ -139,18 +149,31 @@ def extract_cmd(
             with fitz.open(pdf) as doc:
                 selection = list(range(doc.page_count))
 
-        blocks, base_size = extract(pdf, selection)
-        blocks = classify(blocks, base_size)
+        result = extract(pdf, selection)
+        blocks = classify(result.blocks, result.base_size)
 
         store.clear_blocks(selection)
         store.put_blocks(blocks)
         store.set_meta("pdf", str(pdf.resolve()))
-        store.set_meta("base_size", base_size)
+        store.set_meta("base_size", result.base_size)
+        # Renseignés une seule fois : une extraction partielle ne doit pas
+        # écraser ce qu'une extraction plus large avait établi.
+        for key, value in (
+            ("serif_font", result.serif_font),
+            ("title", result.title),
+            ("author", result.author),
+        ):
+            if value and not store.get_meta(key):
+                store.set_meta(key, value)
 
+        serif = match_serif(store.get_meta("serif_font"))
         console.print(
             f"[green]{len(blocks)}[/green] blocs extraits sur "
-            f"[green]{len(selection)}[/green] pages (corps de texte : {base_size} pt)"
+            f"[green]{len(selection)}[/green] pages (corps : {result.base_size} pt · "
+            f"police {store.get_meta('serif_font') or '?'} → substitution [cyan]{serif}[/cyan])"
         )
+        if store.get_meta("title"):
+            console.print(f"Ouvrage : [cyan]{describe_book(store.get_meta('title'), store.get_meta('author'))}[/cyan]")
         reporting.print_classification(console, summary(blocks))
 
 
@@ -191,9 +214,11 @@ def translate_cmd(
             console.print("[yellow]Aucun bloc traduisible — lancez d'abord `extract`.[/yellow]")
             raise typer.Exit(1)
 
+        book = describe_book(store.get_meta("title", ""), store.get_meta("author", ""))
         translator = build_translator(
-            engine, glossary, model, effort, temperature, base_url, length_tolerance
+            engine, glossary, model, effort, temperature, base_url, length_tolerance, book
         )
+        console.print(f"Ouvrage : [cyan]{book}[/cyan]")
         console.print(
             f"{len(todo)} blocs à traduire · moteur [cyan]{engine}[/cyan] · "
             f"modèle [cyan]{translator.model_id}[/cyan]"
@@ -306,7 +331,11 @@ def render_cmd(
             console.print("[yellow]Aucun bloc traduit — lancez d'abord `translate`.[/yellow]")
             raise typer.Exit(1)
 
-        stats = render_pdf(source, out, blocks, workspace, min_scale=min_scale, subset=subset)
+        serif = match_serif(store.get_meta("serif_font"))
+        console.print(f"Police de substitution : [cyan]{serif}[/cyan]")
+        stats = render_pdf(
+            source, out, blocks, workspace, min_scale=min_scale, subset=subset, serif=serif
+        )
         csv_path = reporting.write_render_csv(stats, workspace.reports / "rendu.csv")
 
     console.print(f"PDF écrit : [cyan]{out}[/cyan]")

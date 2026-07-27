@@ -33,14 +33,68 @@ def placeholder(n: int) -> str:
 
 FONT_VARIANTS = ("regular", "bold", "italic", "bolditalic", "mono", "symbol")
 
-_FONT_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "regular": ("times.ttf", "Times New Roman.ttf", "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf"),
-    "bold": ("timesbd.ttf", "Times New Roman Bold.ttf", "LiberationSerif-Bold.ttf", "DejaVuSerif-Bold.ttf"),
-    "italic": ("timesi.ttf", "Times New Roman Italic.ttf", "LiberationSerif-Italic.ttf", "DejaVuSerif-Italic.ttf"),
-    "bolditalic": ("timesbi.ttf", "Times New Roman Bold Italic.ttf", "LiberationSerif-BoldItalic.ttf", "DejaVuSerif-BoldItalic.ttf"),
+#: Familles de substitution disponibles. Chaque ouvrage a sa police de labeur ;
+#: en choisir une proche préserve la couleur de la page et, à largeur de
+#: caractère plus étroite, ménage de la place pour l'allongement du français.
+SERIF_FAMILIES: dict[str, dict[str, tuple[str, ...]]] = {
+    "times": {
+        "regular": ("times.ttf", "Times New Roman.ttf", "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf"),
+        "bold": ("timesbd.ttf", "Times New Roman Bold.ttf", "LiberationSerif-Bold.ttf", "DejaVuSerif-Bold.ttf"),
+        "italic": ("timesi.ttf", "Times New Roman Italic.ttf", "LiberationSerif-Italic.ttf", "DejaVuSerif-Italic.ttf"),
+        "bolditalic": ("timesbi.ttf", "Times New Roman Bold Italic.ttf", "LiberationSerif-BoldItalic.ttf", "DejaVuSerif-BoldItalic.ttf"),
+    },
+    "constantia": {
+        "regular": ("constan.ttf", "Constantia.ttf"),
+        "bold": ("constanb.ttf", "Constantia Bold.ttf"),
+        "italic": ("constani.ttf", "Constantia Italic.ttf"),
+        "bolditalic": ("constanz.ttf", "Constantia Bold Italic.ttf"),
+    },
+    "palatino": {
+        "regular": ("PALA.TTF", "Palatino.ttc", "pala.ttf"),
+        "bold": ("PALAB.TTF", "palab.ttf"),
+        "italic": ("PALAI.TTF", "palai.ttf"),
+        "bolditalic": ("PALABI.TTF", "palabi.ttf"),
+    },
+    "georgia": {
+        "regular": ("georgia.ttf",),
+        "bold": ("georgiab.ttf",),
+        "italic": ("georgiai.ttf",),
+        "bolditalic": ("georgiaz.ttf",),
+    },
+}
+
+DEFAULT_SERIF = "times"
+
+#: Correspondance entre la police de labeur du PDF source et la substitution la
+#: plus proche parmi celles disponibles. Le premier fragment trouvé l'emporte.
+SERIF_MATCH: tuple[tuple[str, str], ...] = (
+    ("perpetua", "constantia"),   # humanistes étroites, même couleur de page
+    ("garamond", "constantia"),
+    ("minion", "constantia"),
+    ("constantia", "constantia"),
+    ("palatino", "palatino"),
+    ("book antiqua", "palatino"),
+    ("georgia", "georgia"),
+    ("times", "times"),
+    ("serif", "times"),
+)
+
+
+def match_serif(source_font: str | None) -> str:
+    """Choisit la famille de substitution la plus proche de la police source."""
+    if not source_font:
+        return DEFAULT_SERIF
+    name = source_font.lower()
+    for marker, family in SERIF_MATCH:
+        if marker in name:
+            return family
+    return DEFAULT_SERIF
+
+
+_SHARED_CANDIDATES: dict[str, tuple[str, ...]] = {
     # Identifiants de code cités au fil du texte.
     "mono": ("cour.ttf", "Courier New.ttf", "LiberationMono-Regular.ttf", "DejaVuSansMono.ttf"),
-    # Filet de sécurité pour les symboles mathématiques absents du Times.
+    # Filet de sécurité pour les symboles mathématiques absents de la serif.
     "symbol": ("seguisym.ttf", "cambria.ttc", "DejaVuSans.ttf", "Arial Unicode.ttf"),
 }
 
@@ -81,17 +135,21 @@ def load_env(path: Path | None = None) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-def ensure_fonts(dest: Path) -> dict[str, str]:
-    """Copie les 4 variantes de la police de substitution dans `dest`.
+def ensure_fonts(dest: Path, serif: str = DEFAULT_SERIF) -> dict[str, str]:
+    """Copie les variantes de la police de substitution dans `dest`.
 
     Renvoie {variante: nom de fichier}. Lève RuntimeError si la variante
     « regular » est introuvable — sans elle aucun rendu accentué n'est possible.
     """
     dest.mkdir(parents=True, exist_ok=True)
+    family = SERIF_FAMILIES.get(serif, SERIF_FAMILIES[DEFAULT_SERIF])
+    candidates = {**family, **_SHARED_CANDIDATES}
+    # La famille demandée peut manquer sur la machine : le Times sert de recours.
+    fallback = SERIF_FAMILIES[DEFAULT_SERIF]
     resolved: dict[str, str] = {}
 
     for variant in FONT_VARIANTS:
-        for name in _FONT_CANDIDATES[variant]:
+        for name in candidates[variant] + fallback.get(variant, ()):
             target = dest / name
             if target.exists():
                 resolved[variant] = name

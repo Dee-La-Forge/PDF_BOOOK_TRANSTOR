@@ -336,6 +336,20 @@ def body_size(doc: fitz.Document, pages: Sequence[int]) -> float:
     return sizes.most_common(1)[0][0] if sizes else 10.0
 
 
+def dominant_serif(doc: fitz.Document, pages: Sequence[int]) -> str:
+    """Police de labeur de l'ouvrage, qui guide le choix de la substitution."""
+    names: Counter[str] = Counter()
+    for pno in pages:
+        for block in doc[pno].get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    if font_family(span["font"]) == "serif":
+                        names[_SUBSET_PREFIX.sub("", span["font"])] += len(span["text"].strip())
+    return names.most_common(1)[0][0] if names else ""
+
+
 def extract_page(page: fitz.Page, pno: int) -> list[Block]:
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_LIGATURES
     raw = page.get_text("dict", flags=flags, sort=True)["blocks"]
@@ -392,7 +406,18 @@ def extract_page(page: fitz.Page, pno: int) -> list[Block]:
     return out
 
 
-def extract(pdf_path: Path, pages: Sequence[int]) -> tuple[list[Block], float]:
+@dataclass
+class Extraction:
+    """Blocs extraits, accompagnés de ce que le PDF dit de lui-même."""
+
+    blocks: list[Block]
+    base_size: float
+    serif_font: str
+    title: str
+    author: str
+
+
+def extract(pdf_path: Path, pages: Sequence[int]) -> Extraction:
     """Extrait les blocs des pages demandées (index 0-based)."""
     with fitz.open(pdf_path) as doc:
         invalid = [p for p in pages if not 0 <= p < doc.page_count]
@@ -401,8 +426,14 @@ def extract(pdf_path: Path, pages: Sequence[int]) -> tuple[list[Block], float]:
                 f"Pages hors document (1-{doc.page_count}) : "
                 + ", ".join(str(p + 1) for p in invalid)
             )
-        base = body_size(doc, pages)
+        meta = doc.metadata or {}
         blocks: list[Block] = []
         for pno in pages:
             blocks.extend(extract_page(doc[pno], pno))
-    return blocks, base
+        return Extraction(
+            blocks=blocks,
+            base_size=body_size(doc, pages),
+            serif_font=dominant_serif(doc, pages),
+            title=(meta.get("title") or "").strip(),
+            author=(meta.get("author") or "").strip(),
+        )
