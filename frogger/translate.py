@@ -161,6 +161,10 @@ class LLMTranslator:
         self.max_tokens = max_tokens
         self.usage = Usage()
         self.system = f"{SYSTEM_RULES}\n\n{glossary.as_prompt()}"
+        #: Blocs dont la reprise a échoué : acceptés faute de mieux, mais
+        #: signalés — une traduction fautive acceptée en silence est pire
+        #: qu'une traduction manquante.
+        self.unresolved: list[str] = []
 
     @property
     def profile(self) -> str:
@@ -246,6 +250,8 @@ class LLMTranslator:
                 result.update(self._parse(self._complete(self._payload(subset, context, note))))
             except Exception:  # noqa: BLE001 — on garde le premier jet
                 pass
+            still_faulty = self._check(subset, result)
+            self.unresolved.extend(still_faulty.values())
         return result
 
     def translate_batch(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
@@ -553,4 +559,5 @@ def translate_blocks(
         if progress:
             progress(page, len(page_blocks))
 
+    run.errors.extend(f"non corrigé — {problem}" for problem in getattr(translator, "unresolved", []))
     return run

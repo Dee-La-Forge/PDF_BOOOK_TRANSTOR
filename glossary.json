@@ -15,6 +15,11 @@
     "test set": "jeu de test",
     "validation set": "jeu de validation",
     "cross-validation": "validation croisée",
+    "serial correlation": "autocorrélation",
+    "serially correlated": "autocorrélé",
+    "overlap": "recouvrement",
+    "overlapping": "qui se recouvrent",
+    "concurrent": "concomitant",
     "k-fold": "k-fold",
     "purged k-fold": "k-fold purgé",
     "purging": "purge",
@@ -107,6 +112,7 @@
     "transaction costs": "coûts de transaction"
   },
   "keep": [
+    "CV", "IID", "ARMA", "k-fold",
     "pandas", "NumPy", "SciPy", "scikit-learn", "sklearn", "matplotlib", "statsmodels",
     "Python", "CPU", "GPU", "API", "CSV", "HDF5", "SQL",
     "López de Prado", "Bailey", "Lo", "Sharpe", "Bloomberg", "Reuters",
