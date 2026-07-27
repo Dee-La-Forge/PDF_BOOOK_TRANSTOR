@@ -268,6 +268,29 @@ def _style(block: dict) -> dict[str, Any]:
     }
 
 
+def _rotation(block: dict) -> int:
+    """Orientation d'écriture du bloc, en degrés (0, 90, 180 ou 270).
+
+    Certains ouvrages composent leur titre courant à la verticale dans la marge.
+    Réinséré à l'horizontale, il s'écrase dans un rectangle étroit et devient
+    illisible ; il faut donc conserver l'angle.
+    """
+    dirs: Counter[tuple[float, float]] = Counter()
+    for line in block["lines"]:
+        dx, dy = line.get("dir", (1.0, 0.0))
+        dirs[(round(dx), round(dy))] += max(1, len(line.get("spans", [])))
+    if not dirs:
+        return 0
+    dx, dy = dirs.most_common(1)[0][0]
+    if (dx, dy) == (0, -1):
+        return 90
+    if (dx, dy) == (-1, 0):
+        return 180
+    if (dx, dy) == (0, 1):
+        return 270
+    return 0
+
+
 def _geometry(block: dict, page_rect: fitz.Rect, column: tuple[float, float]) -> dict[str, Any]:
     x0, y0, x1, y1 = block["bbox"]
     left, right = column
@@ -400,6 +423,7 @@ def extract_page(page: fitz.Page, pno: int) -> list[Block]:
                     "top_ratio": round(geom["top_ratio"], 4),
                     "bottom_ratio": round(geom["bottom_ratio"], 4),
                     "in_table": in_table,
+                    "rotation": _rotation(raw_block),
                 },
             )
         )

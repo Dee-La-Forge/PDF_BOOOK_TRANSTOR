@@ -157,6 +157,12 @@ def insert_rect(
     size = max(block.size, 1.0)
     leading = max(block.line_height, size * 1.05)
 
+    # Sur un bloc tourné, hauteur et largeur échangent leurs rôles : le calcul
+    # d'agrandissement qui suit n'a plus de sens. On s'en tient à la boîte
+    # d'origine, la rotation étant transmise au moteur de rendu.
+    if int(block.features.get("rotation", 0)) % 180:
+        return rect
+
     neighbours = [fitz.Rect(o.bbox) for o in page_blocks if o.id != block.id]
     neighbours.extend(obstacles)
     # Les blocs déjà posés valent par l'espace qu'ils occupent réellement, et
@@ -205,6 +211,7 @@ def _insert(
     css: str,
     archive: fitz.Archive,
     min_scale: float,
+    rotate: int = 0,
 ) -> tuple[float, float, str]:
     """Insère le HTML dans le rectangle, sans jamais perdre de texte.
 
@@ -221,7 +228,7 @@ def _insert(
     for scale_low, libre in ((min_scale, False), (0, True)):
         try:
             spare, scale = page.insert_htmlbox(
-                rect, html, css=css, archive=archive, scale_low=scale_low
+                rect, html, css=css, archive=archive, scale_low=scale_low, rotate=rotate
             )
         except Exception as exc:  # noqa: BLE001
             failure = str(exc)
@@ -278,7 +285,10 @@ def render(
             for block in sorted(targets, key=lambda b: (b.bbox[1], b.order)):
                 rect = insert_rect(block, page_blocks, obstacles, page.rect, claimed)
                 claimed.append(fitz.Rect(rect))
-                spare, scale, note = _insert(page, rect, block_html(block, serif), css, archive, min_scale)
+                spare, scale, note = _insert(
+                    page, rect, block_html(block, serif), css, archive, min_scale,
+                    rotate=int(block.features.get("rotation", 0)),
+                )
 
                 stats.append(
                     RenderStat(
