@@ -155,10 +155,24 @@ class LLMTranslator:
     #: perdre des blocs en cours de route.
     batch_size: int | None = None
 
-    def __init__(self, glossary: Glossary, model: str, max_tokens: int = 16000):
+    #: Dépassement de budget toléré avant de renvoyer le bloc au modèle.
+    #: Le français s'allonge naturellement d'environ 17 % : à 1.10, un modèle
+    #: qui se contente de traduire fidèlement sans resserrer repart à sa copie.
+    DEFAULT_LENGTH_TOLERANCE = 1.10
+
+    def __init__(
+        self,
+        glossary: Glossary,
+        model: str,
+        max_tokens: int = 16000,
+        length_tolerance: float | None = None,
+    ):
         self.glossary = glossary
         self.model_id = model
         self.max_tokens = max_tokens
+        self.length_tolerance = (
+            self.DEFAULT_LENGTH_TOLERANCE if length_tolerance is None else length_tolerance
+        )
         self.usage = Usage()
         self.system = f"{SYSTEM_RULES}\n\n{glossary.as_prompt()}"
         #: Blocs dont la reprise a échoué : acceptés faute de mieux, mais
@@ -213,8 +227,7 @@ class LLMTranslator:
 
     # --- contrôle ------------------------------------------------------------
 
-    @staticmethod
-    def _check(blocks: Sequence[Block], result: dict[str, str]) -> dict[str, str]:
+    def _check(self, blocks: Sequence[Block], result: dict[str, str]) -> dict[str, str]:
         """Repère les traductions manquantes, trop longues ou ayant perdu un marqueur."""
         problems: dict[str, str] = {}
         for block in blocks:
@@ -228,15 +241,23 @@ class LLMTranslator:
                     f"[{block.id}] marqueurs attendus {expected}, reçus {got} : "
                     "reproduis-les tous, à l'identique."
                 )
-            elif len(fr) > block.char_budget * 1.30:
+            elif len(fr) > block.char_budget * self.length_tolerance:
                 problems[block.id] = (
                     f"[{block.id}] {len(fr)} caractères pour un budget de "
-                    f"{block.char_budget} : resserre la formulation."
+                    f"{block.char_budget} : resserre la formulation, sans rien retrancher au sens."
                 )
         return problems
 
+    def _complete_and_parse(self, user: str) -> dict[str, str]:
+        """Un modèle en mode `json_object` produit parfois un JSON invalide.
+        Une seconde tentative suffit presque toujours."""
+        try:
+            return self._parse(self._complete(user))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return self._parse(self._complete(user))
+
     def _translate_chunk(self, blocks: Sequence[Block], context: str) -> dict[str, str]:
-        result = self._parse(self._complete(self._payload(blocks, context)))
+        result = self._complete_and_parse(self._payload(blocks, context))
         faulty = self._check(blocks, result)
         if faulty:
             self.usage.repairs += 1
@@ -247,7 +268,7 @@ class LLMTranslator:
             )
             subset = [b for b in blocks if b.id in faulty]
             try:
-                result.update(self._parse(self._complete(self._payload(subset, context, note))))
+                result.update(self._complete_and_parse(self._payload(subset, context, note)))
             except Exception:  # noqa: BLE001 — on garde le premier jet
                 pass
             still_faulty = self._check(subset, result)
@@ -322,16 +343,17 @@ class ClaudeTranslator(LLMTranslator):
         model: str = DEFAULT_MODEL,
         effort: str = DEFAULT_EFFORT,
         max_tokens: int = 16000,
+        length_tolerance: float | None = None,
     ):
         import anthropic  # importé tardivement : inutile pour les autres moteurs
 
-        super().__init__(glossary, model, max_tokens)
+        super().__init__(glossary, model, max_tokens, length_tolerance)
         self.client = anthropic.Anthropic()
         self.effort = effort
 
     @property
     def profile(self) -> str:
-        return self.effort
+        return f"{self.effort}/L{self.length_tolerance:g}"
 
     def _complete(self, user: str) -> str:
         response = self.client.messages.create(
@@ -387,10 +409,11 @@ class OpenAICompatTranslator(LLMTranslator):
         max_tokens: int = 8000,
         base_url: str | None = None,
         api_key: str | None = None,
+        length_tolerance: float | None = None,
     ):
         from openai import OpenAI  # importé tardivement
 
-        super().__init__(glossary, model or self.default_model, max_tokens)
+        super().__init__(glossary, model or self.default_model, max_tokens, length_tolerance)
         key = api_key or (os.environ.get(self.api_key_env) if self.api_key_env else None)
         if self.api_key_env and not key:
             raise RuntimeError(
@@ -405,7 +428,7 @@ class OpenAICompatTranslator(LLMTranslator):
 
     @property
     def profile(self) -> str:
-        return f"t{self.temperature}"
+        return f"t{self.temperature}/L{self.length_tolerance:g}"
 
     def _record(self, usage: Any) -> None:
         self.usage.requests += 1
@@ -474,6 +497,10 @@ class TranslationRun:
     usage: Usage = field(default_factory=Usage)
     errors: list[str] = field(default_factory=list)
     aborted: str = ""
+    #: Blocs qui gardent une traduction produite sous un réglage antérieur,
+    #: faute d'avoir pu être retraduits. Les compter pour traduits masquerait
+    #: un échec derrière un ancien succès.
+    stale: int = 0
 
 
 #: Échecs sans espoir de reprise : inutile de parcourir tout l'ouvrage pour
@@ -544,9 +571,11 @@ def translate_blocks(
             for block in pending:
                 fr = result.get(block.id)
                 if not fr:
+                    if block.fr:
+                        run.stale += 1
                     # Une page entièrement en échec s'est déjà signalée : inutile
                     # de répéter l'erreur pour chacun de ses blocs.
-                    if not page_failed:
+                    elif not page_failed:
                         run.errors.append(f"{block.id} : aucune traduction renvoyée")
                     continue
                 block.fr = fr

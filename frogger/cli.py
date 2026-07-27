@@ -80,6 +80,7 @@ def build_translator(
     effort: str,
     temperature: Optional[float],
     base_url: Optional[str],
+    length_tolerance: Optional[float] = None,
 ):
     """`model` vaut le défaut Claude tant que l'utilisateur ne l'a pas changé :
     on ne le transmet donc qu'aux moteurs auxquels il correspond."""
@@ -88,14 +89,18 @@ def build_translator(
     if engine == "fake":
         return FakeTranslator()
     if engine == "claude":
-        return ClaudeTranslator(glossary, model=model, effort=effort)
+        return ClaudeTranslator(
+            glossary, model=model, effort=effort, length_tolerance=length_tolerance
+        )
     if engine == "deepseek":
         return DeepSeekTranslator(
-            glossary, model=custom_model, temperature=temperature, base_url=base_url
+            glossary, model=custom_model, temperature=temperature,
+            base_url=base_url, length_tolerance=length_tolerance,
         )
     if engine == "ollama":
         return OllamaTranslator(
-            glossary, model=custom_model, temperature=temperature, base_url=base_url
+            glossary, model=custom_model, temperature=temperature,
+            base_url=base_url, length_tolerance=length_tolerance,
         )
     raise typer.BadParameter(f"--engine attend l'un de : {', '.join(ENGINES)}.")
 
@@ -168,6 +173,10 @@ def translate_cmd(
     effort: str = typer.Option(DEFAULT_EFFORT, "--effort", help="Claude : low | medium | high | xhigh | max"),
     temperature: Optional[float] = typer.Option(None, "--temperature", help="DeepSeek / Ollama."),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Point d'entrée compatible OpenAI."),
+    length_tolerance: Optional[float] = typer.Option(
+        None, "--length-tolerance",
+        help="Dépassement de budget toléré avant reprise (défaut 1.10).",
+    ),
     glossary_path: Optional[Path] = typer.Option(None, "--glossary", help="Glossaire JSON alternatif."),
 ):
     """Traduit les blocs de prose (cache : rien n'est repayé deux fois)."""
@@ -182,7 +191,9 @@ def translate_cmd(
             console.print("[yellow]Aucun bloc traduisible — lancez d'abord `extract`.[/yellow]")
             raise typer.Exit(1)
 
-        translator = build_translator(engine, glossary, model, effort, temperature, base_url)
+        translator = build_translator(
+            engine, glossary, model, effort, temperature, base_url, length_tolerance
+        )
         console.print(
             f"{len(todo)} blocs à traduire · moteur [cyan]{engine}[/cyan] · "
             f"modèle [cyan]{translator.model_id}[/cyan]"
@@ -195,8 +206,13 @@ def translate_cmd(
 
             run = translate_blocks(blocks, translator, store, glossary.digest, progress=progress)
 
-    done = sum(1 for b in blocks if b.translatable and b.fr)
-    console.print(f"[green]{done}/{len(todo)}[/green] blocs traduits")
+    fresh = run.usage.translated_blocks + run.usage.cached_blocks
+    console.print(f"[green]{fresh}/{len(todo)}[/green] blocs à jour")
+    if run.stale:
+        console.print(
+            f"[yellow]{run.stale}[/yellow] blocs conservent une traduction "
+            "produite sous un réglage antérieur"
+        )
     reporting.print_usage(console, run.usage, translator.model_id)
     for err in run.errors[:10]:
         console.print(f"[red]![/red] {err}")
