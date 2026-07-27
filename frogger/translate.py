@@ -467,6 +467,20 @@ class OllamaTranslator(OpenAICompatTranslator):
 class TranslationRun:
     usage: Usage = field(default_factory=Usage)
     errors: list[str] = field(default_factory=list)
+    aborted: str = ""
+
+
+#: Échecs sans espoir de reprise : inutile de parcourir tout l'ouvrage pour
+#: collectionner la même erreur d'authentification ou de facturation.
+_FATAL = (
+    "insufficient balance", "invalid api key", "authentication",
+    "unauthorized", "invalid_api_key", "402", "401", "403",
+)
+
+
+def _is_fatal(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _FATAL)
 
 
 def translate_blocks(
@@ -507,15 +521,27 @@ def translate_blocks(
                 pending.append(block)
 
         if pending:
+            page_failed = False
             try:
                 result = translator.translate_batch(pending, context)
-            except Exception as exc:  # noqa: BLE001 — on continue sur les autres pages
+            except Exception as exc:  # noqa: BLE001 — on poursuit sur les autres pages
+                result, page_failed = {}, True
                 run.errors.append(f"page {page + 1} : {exc}")
-                result = {}
+                if _is_fatal(exc):
+                    run.aborted = (
+                        "arrêt : l'erreur porte sur les identifiants ou le solde du "
+                        "compte, la réessayer page après page ne changerait rien."
+                    )
+                    store.put_blocks(page_blocks)
+                    return run
+
             for block in pending:
                 fr = result.get(block.id)
                 if not fr:
-                    run.errors.append(f"{block.id} : aucune traduction renvoyée")
+                    # Une page entièrement en échec s'est déjà signalée : inutile
+                    # de répéter l'erreur pour chacun de ses blocs.
+                    if not page_failed:
+                        run.errors.append(f"{block.id} : aucune traduction renvoyée")
                     continue
                 block.fr = fr
                 translator.usage.translated_blocks += 1

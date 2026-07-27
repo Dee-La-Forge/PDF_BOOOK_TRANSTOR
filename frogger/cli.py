@@ -198,8 +198,13 @@ def translate_cmd(
     done = sum(1 for b in blocks if b.translatable and b.fr)
     console.print(f"[green]{done}/{len(todo)}[/green] blocs traduits")
     reporting.print_usage(console, run.usage, translator.model_id)
-    for err in run.errors:
+    for err in run.errors[:10]:
         console.print(f"[red]![/red] {err}")
+    if len(run.errors) > 10:
+        console.print(f"[red]![/red] … et {len(run.errors) - 10} autres")
+    if run.aborted:
+        console.print(f"[bold red]{run.aborted}[/bold red]")
+        raise typer.Exit(1)
 
 
 def export_cmd(

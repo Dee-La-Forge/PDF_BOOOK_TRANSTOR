@@ -71,7 +71,9 @@ def load_env(path: Path | None = None) -> None:
     path = path or Path.cwd() / ".env"
     if not path.is_file():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig : PowerShell écrit volontiers un BOM, qui sinon se retrouve
+    # collé au nom de la première clé et la rend introuvable.
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
