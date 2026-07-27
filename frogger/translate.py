@@ -246,6 +246,15 @@ class LLMTranslator:
                     f"[{block.id}] {len(fr)} caractères pour un budget de "
                     f"{block.char_budget} : resserre la formulation, sans rien retrancher au sens."
                 )
+            elif len(block.text) > 60 and len(fr) < 0.55 * len(block.text):
+                # Le français n'est jamais plus court que l'anglais d'un tiers :
+                # un tel écart trahit un fragment omis, ou un décalage entre les
+                # identifiants et les textes de la réponse.
+                problems[block.id] = (
+                    f"[{block.id}] {len(fr)} caractères pour {len(block.text)} en anglais : "
+                    "traduction anormalement courte, vérifie qu'aucun fragment ne manque "
+                    "et que le texte correspond bien à cet identifiant."
+                )
         return problems
 
     def _complete_and_parse(self, user: str) -> dict[str, str]:

@@ -142,6 +142,7 @@ def insert_rect(
     page_blocks: Sequence[Block],
     obstacles: Sequence[fitz.Rect],
     page_rect: fitz.Rect,
+    claimed: Sequence[fitz.Rect] = (),
 ) -> fitz.Rect:
     """Rectangle de réinsertion : la boîte d'origine, remise à la bonne hauteur.
 
@@ -157,6 +158,10 @@ def insert_rect(
 
     neighbours = [fitz.Rect(o.bbox) for o in page_blocks if o.id != block.id]
     neighbours.extend(obstacles)
+    # Les blocs déjà posés valent par l'espace qu'ils occupent réellement, et
+    # non par leur boîte d'origine : sans cela, un paragraphe descendant dans
+    # la gouttière et le titre suivant y remontant revendiquent le même vide.
+    neighbours.extend(claimed)
 
     def overlaps_horizontally(other: fitz.Rect) -> bool:
         return not (other.x1 <= rect.x0 + 2.0 or other.x0 >= rect.x1 - 2.0)
@@ -263,8 +268,12 @@ def render(
             page.apply_redactions(**_REDACT_KWARGS)
 
             obstacles = _obstacles(page)
-            for block in targets:
-                rect = insert_rect(block, page_blocks, obstacles, page.rect)
+            claimed: list[fitz.Rect] = []
+            # De haut en bas : chaque bloc voit l'emprise définitive de ceux
+            # qui le précèdent.
+            for block in sorted(targets, key=lambda b: (b.bbox[1], b.order)):
+                rect = insert_rect(block, page_blocks, obstacles, page.rect, claimed)
+                claimed.append(fitz.Rect(rect))
                 spare, scale, note = _insert(page, rect, block_html(block, serif), css, archive, min_scale)
 
                 stats.append(

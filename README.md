@@ -184,8 +184,12 @@ traduction française le respecte, le moteur factice le viole par construction.
   imbriquée au milieu d'une phrase. La traduction se fait page par page, ce qui
   donne au modèle le contexte des blocs voisins, mais la coupure subsiste.
 - **Tableaux non traduits** — ils sont détectés et laissés intacts.
-- **Dérive verticale** — chaque bloc s'étendant vers le bas, un paragraphe long
-  peut venir au contact du suivant. Signalé dans le rapport.
+- **Blocs tassés sur les pages denses** — les blocs sont posés de haut en bas,
+  chacun voyant l'emprise définitive des précédents, si bien qu'aucun ne peut
+  empiéter sur son voisin. Là où la page est serrée, l'ajustement se fait donc
+  par réduction d'échelle : sur un chapitre entièrement rédigé, un quart des
+  blocs peut descendre sous 80 % du corps d'origine. Tout est signalé dans
+  `reports/rendu.csv`.
 
 ## Structure
 
