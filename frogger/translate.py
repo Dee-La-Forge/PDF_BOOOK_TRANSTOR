@@ -488,6 +488,13 @@ class OllamaTranslator(OpenAICompatTranslator):
     batch_size = 5
     DEFAULT_TEMPERATURE = 0.3
 
+    #: Mesuré sur gemma4:latest, pages 130-136 : passer le seuil de 1.30 à 1.10
+    #: n'a rien changé aux dépassements (32 → 31 blocs sur 50) ni au rendu
+    #: (17 blocs compressés dans les deux cas), pour deux requêtes de plus.
+    #: Un modèle de cette taille reformule sans jamais gagner de place ;
+    #: le renvoyer à sa copie ne fait que consommer du temps machine.
+    DEFAULT_LENGTH_TOLERANCE = 1.30
+
 
 # --- orchestration -----------------------------------------------------------
 
