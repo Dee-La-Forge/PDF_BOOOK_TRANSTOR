@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Espace de travail : PDF sources, bases SQLite, polices copiées, sorties
+data/
+out/
+
+# Secrets
+.env
