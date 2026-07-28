@@ -27,9 +27,9 @@ from .render import render as render_pdf
 from .store import Store, cache_key
 from .translate import (
     ClaudeTranslator,
-    DeepSeekTranslator,
     FakeTranslator,
     OllamaTranslator,
+    OpenAICompatTranslator,
     describe_book,
     translate_blocks,
 )
@@ -79,7 +79,7 @@ def resolve_pdf(store: Store, pdf: Optional[Path]) -> Path:
     return path
 
 
-ENGINES = ("claude", "deepseek", "ollama", "fake")
+ENGINES = ("claude", "ollama", "openai", "fake")
 
 
 def build_translator(
@@ -103,13 +103,18 @@ def build_translator(
             glossary, model=model, effort=effort,
             length_tolerance=length_tolerance, book=book,
         )
-    if engine == "deepseek":
-        return DeepSeekTranslator(
+    if engine == "ollama":
+        return OllamaTranslator(
             glossary, model=custom_model, temperature=temperature,
             base_url=base_url, length_tolerance=length_tolerance, book=book,
         )
-    if engine == "ollama":
-        return OllamaTranslator(
+    if engine == "openai":
+        if not base_url or not custom_model:
+            raise typer.BadParameter(
+                "--engine openai attend --base-url et --model : ce moteur ne "
+                "présuppose aucun fournisseur."
+            )
+        return OpenAICompatTranslator(
             glossary, model=custom_model, temperature=temperature,
             base_url=base_url, length_tolerance=length_tolerance, book=book,
         )
@@ -192,10 +197,10 @@ def classify_cmd(work: Path = WORK_OPT, pages: Optional[str] = PAGES_OPT):
 def translate_cmd(
     work: Path = WORK_OPT,
     pages: Optional[str] = PAGES_OPT,
-    engine: str = typer.Option("claude", "--engine", help="claude | deepseek | ollama | fake"),
+    engine: str = typer.Option("claude", "--engine", help="claude | ollama | openai | fake"),
     model: str = typer.Option(DEFAULT_MODEL, "--model", help="Identifiant du modèle."),
     effort: str = typer.Option(DEFAULT_EFFORT, "--effort", help="Claude : low | medium | high | xhigh | max"),
-    temperature: Optional[float] = typer.Option(None, "--temperature", help="DeepSeek / Ollama."),
+    temperature: Optional[float] = typer.Option(None, "--temperature", help="Ollama / OpenAI."),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Point d'entrée compatible OpenAI."),
     length_tolerance: Optional[float] = typer.Option(
         None, "--length-tolerance",
@@ -371,7 +376,7 @@ def run(
     out: Path = typer.Option(..., "--out", "-o", help="PDF de sortie."),
     pages: Optional[str] = PAGES_OPT,
     work: Path = WORK_OPT,
-    engine: str = typer.Option("claude", "--engine", help="claude | deepseek | ollama | fake"),
+    engine: str = typer.Option("claude", "--engine", help="claude | ollama | openai | fake"),
     model: str = typer.Option(DEFAULT_MODEL, "--model"),
     effort: str = typer.Option(DEFAULT_EFFORT, "--effort"),
     temperature: Optional[float] = typer.Option(None, "--temperature"),

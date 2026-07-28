@@ -43,14 +43,12 @@ class Pricing:
 
 
 #: Anthropic facture la lecture de cache à 0,1x et l'écriture à 1,25x l'entrée.
-#: DeepSeek ne surfacture pas l'écriture : un cache manqué coûte le prix normal.
+#: Un modèle absent de ce barème est simplement rapporté à coût nul.
 PRICES: dict[str, Pricing] = {
     "claude-opus-5": Pricing(5.0, 25.0, 0.5, 6.25),
     "claude-opus-4-8": Pricing(5.0, 25.0, 0.5, 6.25),
     "claude-sonnet-5": Pricing(3.0, 15.0, 0.3, 3.75),
     "claude-haiku-4-5": Pricing(1.0, 5.0, 0.1, 1.25),
-    "deepseek-v4-pro": Pricing(0.435, 0.87, 0.003625, 0.435),
-    "deepseek-v4-flash": Pricing(0.14, 0.28, 0.0028, 0.14),
 }
 
 def describe_book(title: str = "", author: str = "") -> str:
@@ -400,23 +398,24 @@ class ClaudeTranslator(LLMTranslator):
         return next((b.text for b in response.content if b.type == "text"), "")
 
 
-# --- moteur DeepSeek ---------------------------------------------------------
+# --- moteurs compatibles OpenAI ----------------------------------------------
 
 
 class OpenAICompatTranslator(LLMTranslator):
-    """Socle pour tout service exposant l'API chat/completions d'OpenAI.
+    """Tout service exposant l'API chat/completions d'OpenAI.
 
-    Couvre DeepSeek et Ollama. Aucun de ces services ne contraint la sortie par
-    un schéma strict — au mieux un mode `json_object` — d'où l'analyse
-    défensive de la réponse. Le contrôle des marqueurs du socle commun sert de
-    garde-fou : un modèle moins docile dégrade en reprises, pas en silence.
+    Utilisable tel quel en donnant `--base-url` et `--model` ; c'est aussi le
+    socle du moteur Ollama. Aucun de ces services ne contraint la sortie par un
+    schéma strict — au mieux un mode `json_object` — d'où l'analyse défensive de
+    la réponse. Le contrôle des marqueurs du socle commun sert de garde-fou : un
+    modèle moins docile dégrade en reprises, pas en silence.
     """
 
-    name = "openai-compat"
+    name = "openai"
 
     default_base_url = ""
     default_model = ""
-    api_key_env = ""          # vide = service local, sans authentification
+    api_key_env = "OPENAI_API_KEY"  # vide = service local, sans authentification
     timeout = 120.0
     DEFAULT_TEMPERATURE = 1.0
 
@@ -478,20 +477,6 @@ class OpenAICompatTranslator(LLMTranslator):
         )
         self._record(response.usage)
         return response.choices[0].message.content or ""
-
-
-class DeepSeekTranslator(OpenAICompatTranslator):
-    """API DeepSeek."""
-
-    name = "deepseek"
-    default_base_url = "https://api.deepseek.com"
-    default_model = "deepseek-v4-pro"
-    api_key_env = "DEEPSEEK_API_KEY"
-
-    #: Barème DeepSeek : 0.0 pour le code, 1.0 pour l'extraction de données,
-    #: 1.3 pour la traduction. Notre tâche est une traduction sous contrainte
-    #: de format strict, d'où la valeur intermédiaire.
-    DEFAULT_TEMPERATURE = 1.0
 
 
 class OllamaTranslator(OpenAICompatTranslator):

@@ -62,16 +62,15 @@ racine — exclu du dépôt, et lu automatiquement :
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
-DEEPSEEK_API_KEY=sk-...
 ```
 
 ## Moteurs de traduction
 
-| `--engine` | Ce que c'est | Coût pour le livre entier |
+| `--engine` | Ce que c'est | Coût pour un livre de 400 pages |
 |---|---|---|
 | `claude` | API Anthropic, schéma de sortie contraint, cache du prompt système | 10-15 $ (Opus 5), 4-6 $ (Sonnet 5) |
-| `deepseek` | API DeepSeek, compatible OpenAI | < 1 $ |
-| `ollama` | Modèle local, rien ne sort de la machine | gratuit, mais lent |
+| `ollama` | Modèle local, rien ne sort de la machine | gratuit, ~35 s la page |
+| `openai` | Tout service compatible OpenAI ; exige `--base-url` et `--model` | selon le fournisseur |
 | `fake` | Texte accentué 18 % plus long | gratuit |
 
 Tous partagent le même socle : composition des lots, contrôle des marqueurs et
@@ -79,8 +78,8 @@ des budgets, reprise des blocs fautifs. Un moteur moins docile dégrade donc en
 reprises supplémentaires — visibles dans le rapport — et non en sortie
 corrompue silencieusement.
 
-`--base-url` permet de viser n'importe quel service compatible OpenAI, et
-`--model` de choisir le modèle servi.
+Le moteur `openai` ne présuppose aucun fournisseur : il lit sa clé dans
+`OPENAI_API_KEY` et vise l'adresse qu'on lui donne.
 
 ## Utilisation
 
