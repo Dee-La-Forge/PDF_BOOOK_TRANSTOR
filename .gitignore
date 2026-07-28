@@ -10,3 +10,7 @@ out/
 
 # Secrets
 .env
+
+# Artefacts Windows
+desktop.ini
+Thumbs.db

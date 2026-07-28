@@ -1,0 +1,9 @@
+# Normalise les fins de ligne dans le dépôt : LF en base, convention locale
+# dans la copie de travail. Sans cela, un dépôt créé sous Windows impose des
+# CRLF à tout le monde.
+* text=auto eol=lf
+
+*.png binary
+*.pdf binary
+*.ttf binary
+*.db  binary
